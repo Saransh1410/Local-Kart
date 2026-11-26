@@ -1,0 +1,1904 @@
+<!--
+  Local Kart - Hyperlocal Store Discovery & Batch Delivery Platform (MVP)
+  Team: Saransh Devpura (EN23CS306045) & Nitin Dhakad (EN23CS306036)
+  Guide: Prof. Ajaj Khan
+
+  Supports real-time browser GPS, live Haversine 500m radius calculation,
+  and automatic 3-second polling against backend.py (FastAPI + SQLite).
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Local Kart - Hyperlocal Store Discovery</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body class="bg-slate-100 min-h-screen flex justify-center font-sans">
+
+    <div id="root" class="w-full max-w-md bg-white min-h-screen shadow-2xl relative overflow-hidden flex flex-col"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useCallback } = React;
+
+        // Automatically use the current host when served by FastAPI (works on localhost & LAN)
+        const API_URL = window.location.protocol.startsWith("http")
+            ? `${window.location.origin}/api`
+            : "http://127.0.0.1:8000/api";
+
+        const LOCAL_DB_KEY = "localkart_offline_db";
+
+        // Preset coordinates for quick indoor testing if GPS isn't used
+        const DEMO_LOCATIONS = [
+            { label: "Vijay Nagar Square (Demo)", lat: 22.7530, lng: 75.8935 },
+            { label: "Scheme 54 Park (Demo)", lat: 22.7538, lng: 75.8942 },
+            { label: "AB Road Outer (Demo >500m)", lat: 22.7610, lng: 75.8990 }
+        ];
+
+        // Straight-line distance in metres (Haversine formula)
+        function getDistanceMeters(lat1, lon1, lat2, lon2) {
+            const R = 6371000;
+            const toRad = (deg) => (deg * Math.PI) / 180;
+            const dLat = toRad(lat2 - lat1);
+            const dLon = toRad(lon2 - lon1);
+            const a =
+                Math.sin(dLat / 2) ** 2 +
+                Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+            return Math.round(2 * R * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)));
+        }
+
+        // Format distance nicely (e.g. "240m" or "1.4 km")
+        function formatDistance(meters) {
+            if (meters >= 1000) {
+                return `${(meters / 1000).toFixed(1)} km`;
+            }
+            return `${meters}m`;
+        }
+
+        // Free browser Geolocation helper
+        function fetchLiveGPS() {
+            return new Promise((resolve, reject) => {
+                if (!navigator.geolocation) {
+                    reject(new Error("GPS is not supported by this browser."));
+                    return;
+                }
+                navigator.geolocation.getCurrentPosition(
+                    (pos) => {
+                        resolve({
+                            lat: Number(pos.coords.latitude.toFixed(6)),
+                            lng: Number(pos.coords.longitude.toFixed(6)),
+                            accuracy: Math.round(pos.coords.accuracy)
+                        });
+                    },
+                    (err) => {
+                        if (err.code === 1) {
+                            reject(new Error("Location permission denied. Please allow location in browser settings."));
+                        } else {
+                            reject(new Error("Could not get GPS signal. You can enter Lat/Lng manually."));
+                        }
+                    },
+                    { enableHighAccuracy: true, timeout: 10000 }
+                );
+            });
+        }
+
+        const INITIAL_DATA = {
+            users: [
+                { id: 1, name: "Platform Admin", email: "admin@localkart.com", password: "admin123", role: "admin" },
+                { id: 2, name: "Sharma Ji", email: "store@localkart.com", password: "store123", role: "store", store_id: 1 },
+                { id: 3, name: "Demo Customer", email: "customer@localkart.com", password: "customer123", role: "customer" }
+            ],
+            stores: [
+                {
+                    id: 1,
+                    name: "Sharma Groceries",
+                    address: "Scheme 54, Vijay Nagar",
+                    lat: 22.7533,
+                    lng: 75.8937,
+                    distance: 280,
+                    premium: true,
+                    subscriptionActive: true,
+                    status: "Active",
+                    products: [
+                        { id: 101, name: "Aashirvaad Atta", price: 250, unit: "5 kg", description: "100% whole wheat chakki fresh atta", stock: 12 },
+                        { id: 102, name: "Amul Taaza Milk", price: 66, unit: "1 L", description: "Pasteurized toned fresh milk pouch", stock: 25 },
+                        { id: 103, name: "Tata Tea Gold", price: 290, unit: "500 g", description: "Rich aroma Assam tea with long leaves", stock: 8 }
+                    ]
+                },
+                {
+                    id: 2,
+                    name: "Daily Needs Mart",
+                    address: "Near C21 Mall",
+                    lat: 22.7550,
+                    lng: 75.8950,
+                    distance: 440,
+                    premium: false,
+                    subscriptionActive: true,
+                    status: "Active",
+                    products: [
+                        { id: 201, name: "Tata Salt", price: 28, unit: "1 kg", description: "Vacuum evaporated iodized table salt", stock: 20 },
+                        { id: 202, name: "Maggi Noodles", price: 56, unit: "4-Pack (280 g)", description: "2-minute masala instant noodles", stock: 15 },
+                        { id: 203, name: "Amul Taaza Milk", price: 66, unit: "1 L", description: "Pasteurized toned fresh milk pouch", stock: 10 }
+                    ]
+                },
+                {
+                    id: 3,
+                    name: "Faraway Superstore",
+                    address: "AB Road Extension",
+                    lat: 22.7602,
+                    lng: 75.8980,
+                    distance: 820,
+                    premium: false,
+                    subscriptionActive: true,
+                    status: "Active",
+                    products: [
+                        { id: 301, name: "Brown Bread", price: 45, unit: "400 g", description: "Soft whole wheat bakery sandwich bread", stock: 14 },
+                        { id: 302, name: "Olive Oil", price: 520, unit: "500 ml", description: "Extra light olive oil for daily cooking", stock: 6 }
+                    ]
+                }
+            ],
+            orders: []
+        };
+
+        function readLocalDB() {
+            try {
+                const saved = localStorage.getItem(LOCAL_DB_KEY);
+                if (saved) return JSON.parse(saved);
+            } catch (err) {
+                console.warn("Could not read localStorage:", err);
+            }
+            localStorage.setItem(LOCAL_DB_KEY, JSON.stringify(INITIAL_DATA));
+            return JSON.parse(JSON.stringify(INITIAL_DATA));
+        }
+
+        function writeLocalDB(db) {
+            try {
+                localStorage.setItem(LOCAL_DB_KEY, JSON.stringify(db));
+            } catch (err) {
+                console.warn("Could not save to localStorage:", err);
+            }
+        }
+
+        function getAllAvailableProducts(storeList) {
+            const seen = {};
+            const result = [];
+            for (const store of storeList) {
+                if (!store.subscriptionActive || store.status !== "Active") continue;
+                for (const prod of store.products) {
+                    if (!seen[prod.name]) {
+                        seen[prod.name] = true;
+                        result.push(prod);
+                    }
+                }
+            }
+            return result;
+        }
+
+        function App() {
+            const [serverMode, setServerMode] = useState("checking"); // 'checking' | 'fastapi' | 'local'
+            const [notice, setNotice] = useState(null);
+
+            // Auth states
+            const [user, setUser] = useState(null);
+            const [authTab, setAuthTab] = useState("login");
+            const [role, setRole] = useState("customer");
+            const [fullName, setFullName] = useState("");
+            const [email, setEmail] = useState("");
+            const [password, setPassword] = useState("");
+            const [shopName, setShopName] = useState("");
+            const [shopAddress, setShopAddress] = useState("");
+            const [shopLat, setShopLat] = useState("22.7540");
+            const [shopLng, setShopLng] = useState("75.8940");
+            const [capturingGps, setCapturingGps] = useState(false);
+            const [authError, setAuthError] = useState("");
+            const [isSubmitting, setIsSubmitting] = useState(false);
+
+            // App data states
+            const [stores, setStores] = useState([]);
+            const [orders, setOrders] = useState([]);
+            const [searchText, setSearchText] = useState("");
+
+            // Customer location & workflow states
+            const [locationConfirmed, setLocationConfirmed] = useState(false);
+            const [selectedLoc, setSelectedLoc] = useState(DEMO_LOCATIONS[0]);
+            const [customLat, setCustomLat] = useState("");
+            const [customLng, setCustomLng] = useState("");
+            const [browseMode, setBrowseMode] = useState("stores");
+            const [page, setPage] = useState("home");
+            const [activeStoreId, setActiveStoreId] = useState(null);
+            const [cart, setCart] = useState([]);
+            const [instantDelivery, setInstantDelivery] = useState(false);
+            const [showCheckout, setShowCheckout] = useState(false);
+            const [paymentType, setPaymentType] = useState("cod");
+            const [processingOrder, setProcessingOrder] = useState(false);
+
+            // Store owner workflow states
+            const [storeSection, setStoreSection] = useState("orders");
+            const [prodName, setProdName] = useState("");
+            const [prodPrice, setProdPrice] = useState("");
+            const [prodUnit, setProdUnit] = useState("");
+            const [prodDesc, setProdDesc] = useState("");
+            const [prodStock, setProdStock] = useState("");
+
+            // Admin workflow states
+            const [adminSection, setAdminSection] = useState("overview");
+
+            function showNotice(text, type = "info") {
+                setNotice({ text, type });
+                setTimeout(() => setNotice(null), 3200);
+            }
+
+            // Detect if local Python FastAPI server is running
+            useEffect(() => {
+                async function detectServer() {
+                    try {
+                        const controller = new AbortController();
+                        const timer = setTimeout(() => controller.abort(), 1200);
+                        const res = await fetch(`${API_URL}/health`, { signal: controller.signal });
+                        clearTimeout(timer);
+                        if (res.ok) {
+                            setServerMode("fastapi");
+                            return;
+                        }
+                    } catch (err) {
+                        // Server not reachable, use standalone browser mode
+                    }
+                    setServerMode("local");
+                }
+                detectServer();
+            }, []);
+
+            // Fetch stores and orders from active data source
+            const loadAppData = useCallback(async (userOverride = null, locOverride = null) => {
+                const activeUser = userOverride || user;
+                const activeLoc = locOverride || selectedLoc;
+
+                if (serverMode === "fastapi") {
+                    try {
+                        const storeRes = await fetch(`${API_URL}/stores?lat=${activeLoc.lat}&lng=${activeLoc.lng}`);
+                        const storeData = await storeRes.json();
+                        setStores(storeData);
+
+                        if (activeUser) {
+                            let ordersUrl = `${API_URL}/orders?role=${activeUser.role}`;
+                            if (activeUser.role === "customer") {
+                                ordersUrl += `&email=${encodeURIComponent(activeUser.email)}`;
+                            } else if (activeUser.role === "store") {
+                                ordersUrl += `&store_id=${activeUser.store_id || 1}`;
+                            }
+                            const orderRes = await fetch(ordersUrl);
+                            const orderData = await orderRes.json();
+                            setOrders(orderData);
+                        }
+                    } catch (err) {
+                        // Ignore temporary polling failures
+                    }
+                } else if (serverMode === "local") {
+                    const db = readLocalDB();
+                    const updatedStores = db.stores.map((s) => ({
+                        ...s,
+                        distance: getDistanceMeters(activeLoc.lat, activeLoc.lng, s.lat, s.lng)
+                    }));
+                    updatedStores.sort((a, b) => (b.premium - a.premium) || (a.distance - b.distance));
+                    setStores(updatedStores);
+
+                    if (activeUser) {
+                        let visibleOrders = db.orders;
+                        if (activeUser.role === "customer") {
+                            visibleOrders = db.orders.filter((o) => o.customerEmail === activeUser.email);
+                        } else if (activeUser.role === "store") {
+                            visibleOrders = db.orders.filter((o) => o.storeId === (activeUser.store_id || 1));
+                        }
+                        setOrders(visibleOrders);
+                    }
+                }
+            }, [serverMode, user, selectedLoc]);
+
+            // Initial load when user/location changes
+            useEffect(() => {
+                if (serverMode !== "checking") {
+                    loadAppData();
+                }
+            }, [serverMode, user, selectedLoc, loadAppData]);
+
+            // Real-time auto-sync every 3 seconds when connected to FastAPI
+            useEffect(() => {
+                if (serverMode !== "fastapi" || !user) return;
+                const interval = setInterval(() => {
+                    loadAppData();
+                }, 3000);
+                return () => clearInterval(interval);
+            }, [serverMode, user, loadAppData]);
+
+            // --- GPS Handlers ---
+            async function handleCaptureStoreGPS() {
+                setCapturingGps(true);
+                try {
+                    const coords = await fetchLiveGPS();
+                    setShopLat(String(coords.lat));
+                    setShopLng(String(coords.lng));
+                    if (!shopAddress.trim()) {
+                        setShopAddress(`Live GPS (${coords.lat}, ${coords.lng})`);
+                    }
+                    showNotice(`Store GPS captured (±${coords.accuracy}m)`, "success");
+                } catch (err) {
+                    showNotice(err.message, "error");
+                } finally {
+                    setCapturingGps(false);
+                }
+            }
+
+            async function handleDetectCustomerGPS() {
+                setCapturingGps(true);
+                try {
+                    const coords = await fetchLiveGPS();
+                    const liveLoc = {
+                        label: `My Live GPS (${coords.lat}, ${coords.lng})`,
+                        lat: coords.lat,
+                        lng: coords.lng
+                    };
+                    setSelectedLoc(liveLoc);
+                    setCustomLat(String(coords.lat));
+                    setCustomLng(String(coords.lng));
+                    setLocationConfirmed(true);
+                    loadAppData(null, liveLoc);
+                    showNotice(`Live GPS locked (±${coords.accuracy}m)`, "success");
+                } catch (err) {
+                    showNotice(err.message, "error");
+                } finally {
+                    setCapturingGps(false);
+                }
+            }
+
+            function handleApplyManualCoordinates() {
+                const lat = parseFloat(customLat);
+                const lng = parseFloat(customLng);
+                if (isNaN(lat) || isNaN(lng)) {
+                    showNotice("Enter valid numeric Latitude and Longitude.", "error");
+                    return;
+                }
+                const manualLoc = { label: `Custom (${lat.toFixed(4)}, ${lng.toFixed(4)})`, lat, lng };
+                setSelectedLoc(manualLoc);
+                setLocationConfirmed(true);
+                loadAppData(null, manualLoc);
+                showNotice("Custom coordinates applied.", "success");
+            }
+
+            async function handleMoveExistingStoreToGPS(storeId) {
+                setCapturingGps(true);
+                try {
+                    const coords = await fetchLiveGPS();
+                    await updateStoreFlags(storeId, {
+                        lat: coords.lat,
+                        lng: coords.lng,
+                        address: `Live GPS (${coords.lat}, ${coords.lng})`
+                    });
+                    showNotice("Store moved to your live GPS location!", "success");
+                } catch (err) {
+                    showNotice(err.message, "error");
+                } finally {
+                    setCapturingGps(false);
+                }
+            }
+
+            // --- Login & Registration ---
+            async function handleAuth(e) {
+                e.preventDefault();
+                setAuthError("");
+
+                if (!email.trim() || !password.trim()) {
+                    setAuthError("Please fill in both email and password.");
+                    return;
+                }
+
+                setIsSubmitting(true);
+                try {
+                    if (serverMode === "fastapi") {
+                        const path = authTab === "login" ? "/auth/login" : "/auth/register";
+                        const res = await fetch(`${API_URL}${path}`, {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({
+                                name: fullName || email.split("@")[0],
+                                email: email.trim(),
+                                password,
+                                role,
+                                store_name: shopName || undefined,
+                                store_address: shopAddress || "Local Area",
+                                store_lat: parseFloat(shopLat) || 22.7540,
+                                store_lng: parseFloat(shopLng) || 75.8940
+                            })
+                        });
+                        const data = await res.json();
+                        if (!res.ok) throw new Error(data.detail || "Login failed.");
+                        setUser(data.user);
+                        setPassword("");
+                        showNotice(`Logged in as ${data.user.name}`, "success");
+                        loadAppData(data.user);
+                    } else {
+                        const db = readLocalDB();
+                        const cleanEmail = email.trim().toLowerCase();
+
+                        if (authTab === "login") {
+                            const match = db.users.find(
+                                (u) => u.email === cleanEmail && u.password === password && u.role === role
+                            );
+                            if (!match) {
+                                throw new Error(
+                                    role === "admin"
+                                        ? "Invalid Admin credentials. Access denied."
+                                        : "Incorrect email or password for this role."
+                                );
+                            }
+                            setUser(match);
+                            setPassword("");
+                            showNotice(`Welcome back, ${match.name}`, "success");
+                            loadAppData(match);
+                        } else {
+                            if (role === "admin") throw new Error("Admin signup is disabled.");
+                            if (db.users.some((u) => u.email === cleanEmail)) {
+                                throw new Error("This email is already registered.");
+                            }
+
+                            let newStoreId = null;
+                            if (role === "store") {
+                                newStoreId = db.stores.length + 1;
+                                db.stores.push({
+                                    id: newStoreId,
+                                    name: shopName.trim() || `${fullName || "Local"} Store`,
+                                    address: shopAddress.trim() || "Local Area",
+                                    lat: parseFloat(shopLat) || 22.7535,
+                                    lng: parseFloat(shopLng) || 75.8940,
+                                    distance: 0,
+                                    premium: false,
+                                    subscriptionActive: true,
+                                    status: "Active",
+                                    products: [{ id: Date.now(), name: "Sample Rice", price: 75, unit: "1 kg", description: "Everyday basmati rice", stock: 10 }]
+                                });
+                            }
+
+                            const createdUser = {
+                                id: db.users.length + 1,
+                                name: fullName.trim() || cleanEmail.split("@")[0],
+                                email: cleanEmail,
+                                password,
+                                role,
+                                store_id: newStoreId
+                            };
+                            db.users.push(createdUser);
+                            writeLocalDB(db);
+                            setUser(createdUser);
+                            setPassword("");
+                            showNotice("Account created successfully.", "success");
+                            loadAppData(createdUser);
+                        }
+                    }
+                } catch (err) {
+                    setAuthError(err.message);
+                } finally {
+                    setIsSubmitting(false);
+                }
+            }
+
+            function handleLogout() {
+                setUser(null);
+                setSearchText("");
+                setCart([]);
+                setActiveStoreId(null);
+                setInstantDelivery(false);
+                setPage("home");
+                setEmail("");
+                setPassword("");
+                setAuthError("");
+            }
+
+            // --- Store & Order Management Actions ---
+            async function addNewProduct(e) {
+                e.preventDefault();
+                const storeId = user.store_id || 1;
+                const price = parseFloat(prodPrice);
+                const stock = parseInt(prodStock, 10);
+                const unit = prodUnit.trim() || "1 unit";
+                const description = prodDesc.trim();
+
+                if (!prodName.trim() || isNaN(price) || price <= 0 || isNaN(stock) || stock < 0) {
+                    showNotice("Please enter a valid name, price, and stock.", "error");
+                    return;
+                }
+
+                if (serverMode === "fastapi") {
+                    const res = await fetch(`${API_URL}/stores/${storeId}/products`, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ name: prodName.trim(), price, unit, description, stock })
+                    });
+                    if (!res.ok) {
+                        showNotice("Could not add product.", "error");
+                        return;
+                    }
+                } else {
+                    const db = readLocalDB();
+                    const myStore = db.stores.find((s) => s.id === storeId);
+                    if (myStore) {
+                        myStore.products.push({ id: Date.now(), name: prodName.trim(), price, unit, description, stock });
+                        writeLocalDB(db);
+                    }
+                }
+
+                setProdName("");
+                setProdPrice("");
+                setProdUnit("");
+                setProdDesc("");
+                setProdStock("");
+                showNotice("Product added to catalogue.", "success");
+                loadAppData();
+            }
+
+            async function updateStock(storeId, productId, nextStock) {
+                const validStock = Math.max(0, nextStock);
+                if (serverMode === "fastapi") {
+                    await fetch(`${API_URL}/products/${productId}`, {
+                        method: "PATCH",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ stock: validStock })
+                    });
+                } else {
+                    const db = readLocalDB();
+                    const st = db.stores.find((s) => s.id === storeId);
+                    if (st) {
+                        const item = st.products.find((p) => p.id === productId);
+                        if (item) item.stock = validStock;
+                        writeLocalDB(db);
+                    }
+                }
+                loadAppData();
+            }
+
+            async function updateStoreFlags(storeId, changes) {
+                if (serverMode === "fastapi") {
+                    await fetch(`${API_URL}/stores/${storeId}`, {
+                        method: "PATCH",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({
+                            premium: changes.premium,
+                            subscription_active: changes.subscriptionActive,
+                            status: changes.status,
+                            address: changes.address,
+                            lat: changes.lat,
+                            lng: changes.lng
+                        })
+                    });
+                } else {
+                    const db = readLocalDB();
+                    const st = db.stores.find((s) => s.id === storeId);
+                    if (st) {
+                        if (changes.premium !== undefined) st.premium = changes.premium;
+                        if (changes.subscriptionActive !== undefined) st.subscriptionActive = changes.subscriptionActive;
+                        if (changes.status !== undefined) st.status = changes.status;
+                        if (changes.address !== undefined) st.address = changes.address;
+                        if (changes.lat !== undefined) st.lat = changes.lat;
+                        if (changes.lng !== undefined) st.lng = changes.lng;
+                        writeLocalDB(db);
+                    }
+                }
+                loadAppData();
+            }
+
+            async function updateOrder(orderId, changes) {
+                if (serverMode === "fastapi") {
+                    await fetch(`${API_URL}/orders/${orderId}`, {
+                        method: "PATCH",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({
+                            status: changes.status,
+                            batch: changes.batch,
+                            payment_status: changes.paymentStatus
+                        })
+                    });
+                } else {
+                    const db = readLocalDB();
+                    const order = db.orders.find((o) => o.id === orderId);
+                    if (order) {
+                        if (changes.status !== undefined) order.status = changes.status;
+                        if (changes.batch !== undefined) order.batch = changes.batch;
+                        if (changes.paymentStatus !== undefined) order.paymentStatus = changes.paymentStatus;
+                        writeLocalDB(db);
+                    }
+                }
+                showNotice(`Order ${orderId} updated.`, "success");
+                loadAppData();
+            }
+
+            // --- Customer Cart & Checkout ---
+            function handleAddToCart(product, store) {
+                if (product.stock <= 0) {
+                    showNotice("This item is out of stock.", "error");
+                    return;
+                }
+
+                if (cart.length > 0 && cart[0].storeId !== store.id) {
+                    setCart([{ ...product, qty: 1, storeId: store.id, storeName: store.name, storeDistance: store.distance }]);
+                    setInstantDelivery(false);
+                    showNotice(`Cart switched to ${store.name}`, "info");
+                    return;
+                }
+
+                const existing = cart.find((item) => item.id === product.id);
+                if (existing) {
+                    if (existing.qty >= product.stock) {
+                        showNotice(`Only ${product.stock} available in stock.`, "error");
+                        return;
+                    }
+                    setCart(cart.map((item) => (item.id === product.id ? { ...item, qty: item.qty + 1 } : item)));
+                } else {
+                    setCart([...cart, { ...product, qty: 1, storeId: store.id, storeName: store.name, storeDistance: store.distance }]);
+                }
+                showNotice(`Added ${product.name}`, "success");
+            }
+
+            function handleUpdateCartQty(productId, delta) {
+                const target = cart.find((item) => item.id === productId);
+                if (!target) return;
+
+                const nextQty = target.qty + delta;
+                if (nextQty <= 0) {
+                    handleRemoveFromCart(productId);
+                    return;
+                }
+
+                if (delta > 0) {
+                    const storeObj = stores.find((s) => s.id === target.storeId);
+                    const liveProd = storeObj && storeObj.products.find((p) => p.id === productId);
+                    const maxStock = liveProd ? liveProd.stock : target.stock;
+                    if (maxStock !== undefined && nextQty > maxStock) {
+                        showNotice(`Only ${maxStock} available in stock.`, "error");
+                        return;
+                    }
+                }
+
+                setCart(cart.map((item) => (item.id === productId ? { ...item, qty: nextQty } : item)));
+            }
+
+            function handleRemoveFromCart(productId) {
+                const updatedCart = cart.filter((item) => item.id !== productId);
+                setCart(updatedCart);
+                if (updatedCart.length === 0) {
+                    setInstantDelivery(false);
+                }
+                showNotice("Item removed from cart.", "info");
+            }
+
+            function handleClearCart() {
+                setCart([]);
+                setInstantDelivery(false);
+                showNotice("Cart cleared.", "info");
+            }
+
+            function handleInstantBuy(productName) {
+                const matchingStores = stores.filter(
+                    (s) => s.subscriptionActive && s.status === "Active" && s.products.some((p) => p.name === productName && p.stock > 0)
+                );
+
+                if (matchingStores.length === 0) {
+                    showNotice("Currently out of stock in all active stores.", "error");
+                    return;
+                }
+
+                matchingStores.sort((a, b) => a.distance - b.distance);
+                const nearestStore = matchingStores[0];
+                const product = nearestStore.products.find((p) => p.name === productName);
+
+                setCart([{ ...product, qty: 1, storeId: nearestStore.id, storeName: nearestStore.name, storeDistance: nearestStore.distance }]);
+                setInstantDelivery(true);
+                setPage("cart");
+                setSearchText("");
+                showNotice(`Assigned to ${nearestStore.name} (${formatDistance(nearestStore.distance)})`, "success");
+            }
+
+            const subtotal = cart.reduce((sum, item) => sum + item.price * item.qty, 0);
+            const distanceFee = cart.length > 0 && cart[0].storeDistance > 500 ? 40 : 0;
+            const instantFee = instantDelivery ? 50 : 0;
+            const totalPayable = subtotal + distanceFee + instantFee;
+
+            async function confirmOrder() {
+                if (cart.length === 0) return;
+                setProcessingOrder(true);
+
+                try {
+                    if (serverMode === "fastapi") {
+                        const res = await fetch(`${API_URL}/orders`, {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({
+                                customer_email: user.email,
+                                store_id: cart[0].storeId,
+                                delivery_location: selectedLoc.label,
+                                customer_lat: selectedLoc.lat,
+                                customer_lng: selectedLoc.lng,
+                                items: cart.map((i) => ({ product_id: i.id, name: i.name, price: i.price, qty: i.qty })),
+                                is_instant: instantDelivery,
+                                payment_method: paymentType
+                            })
+                        });
+                        const created = await res.json();
+                        if (!res.ok) throw new Error(created.detail || "Could not place order.");
+
+                        if (paymentType === "razorpay") {
+                            await new Promise((resolve) => setTimeout(resolve, 650));
+                            await fetch(`${API_URL}/payments/razorpay/mock-verify`, {
+                                method: "POST",
+                                headers: { "Content-Type": "application/json" },
+                                body: JSON.stringify({
+                                    order_id: created.order_id,
+                                    mock_payment_id: created.payment_ref
+                                })
+                            });
+                        }
+                    } else {
+                        if (paymentType === "razorpay") {
+                            await new Promise((resolve) => setTimeout(resolve, 600));
+                        }
+                        const db = readLocalDB();
+                        const st = db.stores.find((s) => s.id === cart[0].storeId);
+                        if (!st || !st.subscriptionActive || st.status !== "Active") {
+                            throw new Error("Store is currently unavailable.");
+                        }
+
+                        for (const item of cart) {
+                            const dbProd = st.products.find((p) => p.id === item.id);
+                            if (!dbProd || dbProd.stock < item.qty) {
+                                throw new Error(`Not enough stock for ${item.name}.`);
+                            }
+                        }
+
+                        for (const item of cart) {
+                            const dbProd = st.products.find((p) => p.id === item.id);
+                            dbProd.stock -= item.qty;
+                        }
+
+                        const newOrderId = "ORD-" + Math.random().toString(36).substring(2, 8).toUpperCase();
+                        db.orders.unshift({
+                            id: newOrderId,
+                            customerEmail: user.email,
+                            storeId: st.id,
+                            storeName: st.name,
+                            deliveryLocation: selectedLoc.label,
+                            items: cart.map((i) => ({ id: i.id, name: i.name, price: i.price, qty: i.qty })),
+                            subtotal,
+                            distanceFee,
+                            instantFee,
+                            deliveryFee: distanceFee + instantFee,
+                            total: totalPayable,
+                            isInstant: instantDelivery,
+                            status: "Pending Acceptance",
+                            paymentMethod: paymentType,
+                            paymentStatus: paymentType === "razorpay" ? "Verified (Mock Razorpay)" : "Pending (COD)",
+                            paymentRef: paymentType === "razorpay" ? `RZP_MOCK_${newOrderId}` : `COD_${newOrderId}`,
+                            batch: instantDelivery ? "Instant Dispatch" : "Unassigned",
+                            timestamp: new Date().toLocaleString()
+                        });
+                        writeLocalDB(db);
+                    }
+
+                    setCart([]);
+                    setInstantDelivery(false);
+                    setShowCheckout(false);
+                    setPage("orders");
+                    showNotice("Order placed successfully.", "success");
+                    loadAppData();
+                } catch (err) {
+                    showNotice(err.message, "error");
+                } finally {
+                    setProcessingOrder(false);
+                }
+            }
+
+            // --- Helper Renderers ---
+
+            function renderStatusBadge() {
+                const isLive = serverMode === "fastapi";
+                return (
+                    <div className={`text-[10px] font-bold px-2.5 py-0.5 rounded-full flex items-center gap-1.5 ${
+                        isLive
+                            ? "bg-emerald-500/20 text-emerald-100 border border-emerald-400/40"
+                            : "bg-amber-400/20 text-amber-100 border border-amber-300/40"
+                    }`}>
+                        <span className={`w-1.5 h-1.5 rounded-full ${isLive ? "bg-emerald-300 animate-pulse" : "bg-amber-300"}`}></span>
+                        {isLive ? "Live Sync (FastAPI + SQLite)" : "Offline Demo Mode"}
+                    </div>
+                );
+            }
+
+            function renderStoreOwnerPanel() {
+                const myStore = stores.find((s) => s.id === (user.store_id || 1)) || stores[0];
+                if (!myStore) {
+                    return <div className="p-6 text-center text-sm text-slate-500">Loading store data...</div>;
+                }
+
+                const query = searchText.toLowerCase();
+                const filteredOrders = orders.filter((o) => !query || o.id.toLowerCase().includes(query));
+                const filteredProducts = myStore.products.filter((p) => !query || p.name.toLowerCase().includes(query));
+
+                return (
+                    <div className="flex-1 overflow-y-auto p-4 pb-10">
+                        <div className="bg-indigo-700 text-white p-4 rounded-2xl shadow-md mb-4">
+                            <h2 className="font-extrabold text-lg">{myStore.name}</h2>
+                            <p className="text-xs text-indigo-200 mt-0.5">
+                                {myStore.address} • {myStore.status}
+                            </p>
+                            <p className="text-[10px] text-indigo-200/80 mt-1">
+                                GPS: {myStore.lat}, {myStore.lng}
+                            </p>
+                        </div>
+
+                        <div className="flex bg-slate-200/80 p-1 rounded-xl mb-4">
+                            {["orders", "inventory", "settings"].map((tab) => (
+                                <button
+                                    key={tab}
+                                    onClick={() => setStoreSection(tab)}
+                                    className={`flex-1 py-1.5 text-xs font-bold rounded-lg capitalize ${
+                                        storeSection === tab ? "bg-white text-indigo-700 shadow" : "text-slate-600"
+                                    }`}
+                                >
+                                    {tab}
+                                </button>
+                            ))}
+                        </div>
+
+                        {storeSection === "orders" && (
+                            <div className="space-y-3">
+                                {filteredOrders.length === 0 ? (
+                                    <p className="text-xs text-slate-400 bg-white p-6 rounded-2xl border text-center">
+                                        Waiting for incoming orders (auto-refreshes every 3s)...
+                                    </p>
+                                ) : (
+                                    filteredOrders.map((order) => (
+                                        <div key={order.id} className="bg-white border border-slate-200 border-l-4 border-l-indigo-600 rounded-2xl p-4 shadow-sm">
+                                            <div className="flex justify-between items-center mb-2">
+                                                <span className="font-extrabold text-xs text-indigo-800">{order.id}</span>
+                                                <span className="text-[10px] font-bold bg-slate-100 px-2 py-0.5 rounded-full">{order.status}</span>
+                                            </div>
+                                            <p className="text-xs text-slate-500 mb-1">
+                                                Total: <b className="text-emerald-700">₹{order.total}</b> • {order.paymentMethod.toUpperCase()} ({order.paymentStatus})
+                                            </p>
+                                            <p className="text-[11px] text-slate-400 mb-2">Deliver to: {order.deliveryLocation}</p>
+                                            <div className="bg-slate-50 p-2 rounded-lg text-[11px] text-slate-700 mb-3">
+                                                {order.items.map((item) => (
+                                                    <div key={item.id} className="flex justify-between">
+                                                        <span>{item.name}</span>
+                                                        <b>x{item.qty}</b>
+                                                    </div>
+                                                ))}
+                                            </div>
+
+                                            {order.status === "Pending Acceptance" && (
+                                                <div className="flex gap-2">
+                                                    <button
+                                                        onClick={() => updateOrder(order.id, { status: "Preparing" })}
+                                                        className="flex-1 bg-emerald-600 text-white py-2 rounded-lg text-xs font-bold"
+                                                    >
+                                                        Accept
+                                                    </button>
+                                                    <button
+                                                        onClick={() => updateOrder(order.id, { status: "Rejected" })}
+                                                        className="flex-1 bg-red-50 text-red-700 border border-red-200 py-2 rounded-lg text-xs font-bold"
+                                                    >
+                                                        Reject
+                                                    </button>
+                                                </div>
+                                            )}
+
+                                            {order.status === "Preparing" && !order.isInstant && (
+                                                <div className="bg-indigo-50 p-2.5 rounded-xl">
+                                                    <p className="text-[11px] font-bold text-indigo-900 mb-2">Assign Delivery Batch:</p>
+                                                    <div className="flex gap-1.5">
+                                                        {["Morning", "Afternoon", "Evening"].map((slot) => (
+                                                            <button
+                                                                key={slot}
+                                                                onClick={() => updateOrder(order.id, { batch: slot, status: "Ready for Dispatch" })}
+                                                                className="flex-1 bg-white border border-indigo-200 text-indigo-700 hover:bg-indigo-600 hover:text-white py-1.5 rounded-lg text-[11px] font-bold transition"
+                                                            >
+                                                                {slot}
+                                                            </button>
+                                                        ))}
+                                                    </div>
+                                                </div>
+                                            )}
+
+                                            {order.status === "Preparing" && order.isInstant && (
+                                                <button
+                                                    onClick={() => updateOrder(order.id, { status: "Ready for Dispatch" })}
+                                                    className="w-full bg-orange-500 text-white py-2 rounded-lg text-xs font-bold"
+                                                >
+                                                    Ready for Instant Dispatch
+                                                </button>
+                                            )}
+
+                                            {order.status === "Ready for Dispatch" && (
+                                                <button
+                                                    onClick={() =>
+                                                        updateOrder(order.id, {
+                                                            status: "Delivered",
+                                                            paymentStatus: order.paymentMethod === "cod" ? "Collected (COD)" : order.paymentStatus
+                                                        })
+                                                    }
+                                                    className="w-full bg-indigo-600 text-white py-2 rounded-lg text-xs font-bold"
+                                                >
+                                                    Mark Delivered
+                                                </button>
+                                            )}
+                                        </div>
+                                    ))
+                                )}
+                            </div>
+                        )}
+
+                        {storeSection === "inventory" && (
+                            <div>
+                                <form onSubmit={addNewProduct} className="bg-white border border-slate-200 p-4 rounded-2xl mb-4 shadow-sm space-y-2.5">
+                                    <h3 className="font-bold text-xs uppercase text-slate-500">Add Product</h3>
+                                    <input
+                                        type="text"
+                                        placeholder="Product Name (e.g. Aashirvaad Atta)"
+                                        value={prodName}
+                                        onChange={(e) => setProdName(e.target.value)}
+                                        className="w-full p-2 border rounded-lg text-xs outline-none focus:border-indigo-500"
+                                    />
+                                    <div className="flex gap-2">
+                                        <input
+                                            type="number"
+                                            placeholder="Price (₹)"
+                                            value={prodPrice}
+                                            onChange={(e) => setProdPrice(e.target.value)}
+                                            className="w-1/3 p-2 border rounded-lg text-xs outline-none focus:border-indigo-500"
+                                        />
+                                        <input
+                                            type="text"
+                                            placeholder="Per Qty (e.g. 1 kg, 500 ml)"
+                                            value={prodUnit}
+                                            onChange={(e) => setProdUnit(e.target.value)}
+                                            className="w-1/3 p-2 border rounded-lg text-xs outline-none focus:border-indigo-500"
+                                        />
+                                        <input
+                                            type="number"
+                                            placeholder="Stock"
+                                            value={prodStock}
+                                            onChange={(e) => setProdStock(e.target.value)}
+                                            className="w-1/3 p-2 border rounded-lg text-xs outline-none focus:border-indigo-500"
+                                        />
+                                    </div>
+                                    <textarea
+                                        rows="2"
+                                        placeholder="Product Description (brand, quality, pack details...)"
+                                        value={prodDesc}
+                                        onChange={(e) => setProdDesc(e.target.value)}
+                                        className="w-full p-2 border rounded-lg text-xs outline-none focus:border-indigo-500 resize-none"
+                                    ></textarea>
+                                    <button type="submit" className="w-full bg-indigo-600 text-white py-2 rounded-lg text-xs font-bold">
+                                        Save Product
+                                    </button>
+                                </form>
+
+                                <div className="space-y-2">
+                                    {filteredProducts.map((prod) => (
+                                        <div key={prod.id} className="bg-white border border-slate-200 p-3 rounded-xl flex justify-between items-start gap-2 shadow-sm">
+                                            <div className="flex-1 min-w-0">
+                                                <p className="font-bold text-xs text-slate-800">{prod.name}</p>
+                                                <p className="text-[11px] font-semibold text-indigo-700 mt-0.5">
+                                                    ₹{prod.price} <span className="text-slate-500 font-normal">/ {prod.unit || "1 unit"}</span>
+                                                </p>
+                                                {prod.description && (
+                                                    <p className="text-[11px] text-slate-500 mt-1 leading-snug">{prod.description}</p>
+                                                )}
+                                            </div>
+                                            <div className="flex items-center gap-2 shrink-0">
+                                                <button onClick={() => updateStock(myStore.id, prod.id, prod.stock - 1)} className="w-7 h-7 rounded-lg bg-slate-100 font-bold text-slate-700">-</button>
+                                                <span className="text-xs font-bold w-6 text-center">{prod.stock}</span>
+                                                <button onClick={() => updateStock(myStore.id, prod.id, prod.stock + 1)} className="w-7 h-7 rounded-lg bg-indigo-100 font-bold text-indigo-700">+</button>
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
+
+                        {storeSection === "settings" && (
+                            <div className="bg-white border border-slate-200 rounded-2xl p-4 space-y-4 shadow-sm">
+                                <div className="border-b pb-3">
+                                    <p className="font-bold text-xs text-slate-800 mb-1">Store GPS Location</p>
+                                    <p className="text-[11px] text-slate-500 mb-2">
+                                        Current: {myStore.lat}, {myStore.lng}
+                                    </p>
+                                    <button
+                                        disabled={capturingGps}
+                                        onClick={() => handleMoveExistingStoreToGPS(myStore.id)}
+                                        className="w-full bg-blue-600 hover:bg-blue-700 text-white py-2 rounded-lg text-xs font-bold disabled:opacity-50"
+                                    >
+                                        {capturingGps ? "Detecting GPS..." : "Move Store to My Live GPS"}
+                                    </button>
+                                </div>
+                                <div className="flex justify-between items-center border-b pb-3">
+                                    <div>
+                                        <p className="font-bold text-xs text-slate-800">Store Subscription (Mock)</p>
+                                        <p className="text-[11px] text-slate-500">Controls visibility in customer search</p>
+                                    </div>
+                                    <button
+                                        onClick={() => updateStoreFlags(myStore.id, { subscriptionActive: !myStore.subscriptionActive })}
+                                        className={`px-3 py-1 rounded-full text-[11px] font-bold ${
+                                            myStore.subscriptionActive ? "bg-emerald-100 text-emerald-800" : "bg-red-100 text-red-700"
+                                        }`}
+                                    >
+                                        {myStore.subscriptionActive ? "ACTIVE" : "INACTIVE"}
+                                    </button>
+                                </div>
+                                <div className="flex justify-between items-center">
+                                    <div>
+                                        <p className="font-bold text-xs text-slate-800">Premium Listing (Mock)</p>
+                                        <p className="text-[11px] text-slate-500">Shows store higher in nearby results</p>
+                                    </div>
+                                    <button
+                                        onClick={() => updateStoreFlags(myStore.id, { premium: !myStore.premium })}
+                                        className={`px-3 py-1 rounded-full text-[11px] font-bold ${
+                                            myStore.premium ? "bg-amber-300 text-amber-950" : "bg-slate-100 text-slate-600"
+                                        }`}
+                                    >
+                                        {myStore.premium ? "PREMIUM ON" : "UPGRADE"}
+                                    </button>
+                                </div>
+                            </div>
+                        )}
+                    </div>
+                );
+            }
+
+            function renderAdminPanel() {
+                const query = searchText.toLowerCase();
+                const grossVolume = orders.reduce((sum, o) => sum + o.total, 0);
+                const pendingCod = orders
+                    .filter((o) => o.paymentStatus === "Pending (COD)")
+                    .reduce((sum, o) => sum + o.total, 0);
+
+                const matchingStores = stores.filter((s) => !query || s.name.toLowerCase().includes(query));
+                const matchingOrders = orders.filter(
+                    (o) => !query || o.id.toLowerCase().includes(query) || o.storeName.toLowerCase().includes(query)
+                );
+
+                return (
+                    <div className="flex-1 overflow-y-auto p-4 pb-10">
+                        <div className="flex bg-slate-200/80 p-1 rounded-xl mb-4">
+                            {["overview", "stores", "orders"].map((tab) => (
+                                <button
+                                    key={tab}
+                                    onClick={() => setAdminSection(tab)}
+                                    className={`flex-1 py-1.5 text-xs font-bold rounded-lg capitalize ${
+                                        adminSection === tab ? "bg-white text-blue-700 shadow" : "text-slate-600"
+                                    }`}
+                                >
+                                    {tab}
+                                </button>
+                            ))}
+                        </div>
+
+                        {adminSection === "overview" && (
+                            <div className="grid grid-cols-2 gap-3">
+                                <div className="bg-white border p-4 rounded-2xl shadow-sm">
+                                    <p className="text-2xl font-extrabold text-blue-700">{stores.length}</p>
+                                    <p className="text-[11px] text-slate-500 font-bold">Total Stores</p>
+                                </div>
+                                <div className="bg-white border p-4 rounded-2xl shadow-sm">
+                                    <p className="text-2xl font-extrabold text-emerald-700">{orders.length}</p>
+                                    <p className="text-[11px] text-slate-500 font-bold">Total Orders</p>
+                                </div>
+                                <div className="bg-white border p-4 rounded-2xl shadow-sm">
+                                    <p className="text-2xl font-extrabold text-indigo-700">₹{grossVolume}</p>
+                                    <p className="text-[11px] text-slate-500 font-bold">Gross Volume</p>
+                                </div>
+                                <div className="bg-white border p-4 rounded-2xl shadow-sm">
+                                    <p className="text-2xl font-extrabold text-amber-600">₹{pendingCod}</p>
+                                    <p className="text-[11px] text-slate-500 font-bold">Pending COD</p>
+                                </div>
+                            </div>
+                        )}
+
+                        {adminSection === "stores" && (
+                            <div className="space-y-2.5">
+                                {matchingStores.map((store) => (
+                                    <div key={store.id} className="bg-white border border-slate-200 p-3.5 rounded-2xl shadow-sm flex justify-between items-center">
+                                        <div>
+                                            <p className="font-bold text-sm text-slate-800">{store.name}</p>
+                                            <p className="text-[11px] text-slate-500">
+                                                Status: <b>{store.status}</b> • GPS: {store.lat.toFixed(3)}, {store.lng.toFixed(3)}
+                                            </p>
+                                        </div>
+                                        <button
+                                            onClick={() => updateStoreFlags(store.id, { status: store.status === "Active" ? "Suspended" : "Active" })}
+                                            className={`px-3 py-1.5 rounded-lg text-xs font-bold ${
+                                                store.status === "Active"
+                                                    ? "bg-red-50 text-red-700 border border-red-200"
+                                                    : "bg-emerald-50 text-emerald-700 border border-emerald-200"
+                                            }`}
+                                        >
+                                            {store.status === "Active" ? "Suspend" : "Activate"}
+                                        </button>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+
+                        {adminSection === "orders" && (
+                            <div className="space-y-2.5">
+                                {matchingOrders.length === 0 ? (
+                                    <p className="text-xs text-slate-400 bg-white p-6 rounded-2xl border text-center">
+                                        No orders recorded yet.
+                                    </p>
+                                ) : (
+                                    matchingOrders.map((order) => (
+                                        <div key={order.id} className="bg-white border border-slate-200 p-3.5 rounded-2xl shadow-sm">
+                                            <div className="flex justify-between items-center border-b pb-1.5 mb-1.5">
+                                                <span className="font-bold text-xs text-slate-800">{order.id}</span>
+                                                <span className="font-extrabold text-xs text-emerald-700">₹{order.total}</span>
+                                            </div>
+                                            <p className="text-xs text-slate-600">
+                                                {order.storeName} • <span className="font-semibold">{order.status}</span>
+                                            </p>
+                                            <div className="flex justify-between items-center mt-2">
+                                                <span className="text-[10px] bg-slate-100 px-2 py-0.5 rounded font-semibold">
+                                                    {order.paymentMethod.toUpperCase()} • {order.paymentStatus}
+                                                </span>
+                                                {order.paymentStatus === "Pending (COD)" && (
+                                                    <button
+                                                        onClick={() => updateOrder(order.id, { paymentStatus: "Reconciled (COD)" })}
+                                                        className="text-[10px] bg-emerald-600 text-white px-2.5 py-1 rounded-lg font-bold"
+                                                    >
+                                                        Reconcile COD
+                                                    </button>
+                                                )}
+                                            </div>
+                                        </div>
+                                    ))
+                                )}
+                            </div>
+                        )}
+                    </div>
+                );
+            }
+
+            // --- Login / Signup Screen ---
+            if (!user) {
+                return (
+                    <div className="flex flex-col items-center justify-center min-h-screen p-6 bg-slate-50 overflow-y-auto">
+                        {notice && (
+                            <div className={`fixed top-4 left-1/2 -translate-x-1/2 z-50 px-4 py-2.5 rounded-xl shadow-lg text-xs font-bold text-white ${
+                                notice.type === "error" ? "bg-red-600" : notice.type === "success" ? "bg-emerald-600" : "bg-slate-800"
+                            }`}>
+                                {notice.text}
+                            </div>
+                        )}
+                        <div className="w-full max-w-sm">
+                            <div className="flex flex-col items-center mb-5">
+                                <div className="bg-blue-600 p-3.5 rounded-2xl shadow-lg mb-3 text-white">
+                                    <svg className="w-9 h-9" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M16 11V7a4 4 0 00-8 0v4M5 9h14l1 12H4L5 9z"></path>
+                                    </svg>
+                                </div>
+                                <h1 className="text-3xl font-extrabold text-slate-900 tracking-tight">Local Kart</h1>
+                                <p className="text-slate-500 text-xs mt-1">Hyperlocal 500m Store Discovery & Batch Delivery</p>
+                                <div className="mt-2">
+                                    <span className={`text-[11px] font-semibold px-2.5 py-1 rounded-full ${
+                                        serverMode === "fastapi" ? "bg-emerald-100 text-emerald-800" : "bg-blue-100 text-blue-800"
+                                    }`}>
+                                        {serverMode === "fastapi" ? "Connected to FastAPI + SQLite" : "Offline Browser DB"}
+                                    </span>
+                                </div>
+                            </div>
+
+                            <form onSubmit={handleAuth} className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm">
+                                <div className="flex gap-6 mb-4 border-b border-slate-100 pb-2">
+                                    <button
+                                        type="button"
+                                        onClick={() => { setAuthTab("login"); setAuthError(""); }}
+                                        className={`font-bold text-sm pb-1 transition ${
+                                            authTab === "login" ? "text-blue-600 border-b-2 border-blue-600" : "text-slate-400"
+                                        }`}
+                                    >
+                                        Login
+                                    </button>
+                                    {role !== "admin" && (
+                                        <button
+                                            type="button"
+                                            onClick={() => { setAuthTab("register"); setAuthError(""); }}
+                                            className={`font-bold text-sm pb-1 transition ${
+                                                authTab === "register" ? "text-blue-600 border-b-2 border-blue-600" : "text-slate-400"
+                                            }`}
+                                        >
+                                            Register
+                                        </button>
+                                    )}
+                                </div>
+
+                                {authError && (
+                                    <div className="mb-3 p-3 rounded-xl bg-red-50 border border-red-200 text-red-700 text-xs font-semibold">
+                                        {authError}
+                                    </div>
+                                )}
+
+                                <div className="space-y-3 mb-4">
+                                    <div>
+                                        <label className="text-[11px] font-bold text-slate-500 uppercase">Account Role</label>
+                                        <select
+                                            value={role}
+                                            onChange={(e) => {
+                                                setRole(e.target.value);
+                                                setAuthError("");
+                                                if (e.target.value === "admin") setAuthTab("login");
+                                            }}
+                                            className="w-full p-2.5 rounded-xl border border-slate-200 mt-1 text-sm bg-slate-50 focus:bg-white focus:border-blue-500 outline-none"
+                                        >
+                                            <option value="customer">Customer</option>
+                                            <option value="store">Store Owner</option>
+                                            <option value="admin">Platform Admin</option>
+                                        </select>
+                                    </div>
+
+                                    {authTab === "register" && role !== "admin" && (
+                                        <div>
+                                            <label className="text-[11px] font-bold text-slate-500 uppercase">Full Name</label>
+                                            <input
+                                                type="text"
+                                                value={fullName}
+                                                onChange={(e) => setFullName(e.target.value)}
+                                                placeholder="Enter your name"
+                                                className="w-full p-2.5 rounded-xl border border-slate-200 mt-1 text-sm outline-none focus:border-blue-500"
+                                            />
+                                        </div>
+                                    )}
+
+                                    {authTab === "register" && role === "store" && (
+                                        <div className="p-3 bg-indigo-50/70 rounded-xl border border-indigo-100 space-y-2.5">
+                                            <div>
+                                                <label className="text-[11px] font-bold text-indigo-800 uppercase">Store Name</label>
+                                                <input
+                                                    type="text"
+                                                    value={shopName}
+                                                    onChange={(e) => setShopName(e.target.value)}
+                                                    placeholder="e.g. Gupta Kirana"
+                                                    className="w-full p-2 rounded-lg border border-slate-200 mt-1 text-xs bg-white outline-none focus:border-indigo-500"
+                                                />
+                                            </div>
+                                            <div>
+                                                <label className="text-[11px] font-bold text-indigo-800 uppercase">Store Address</label>
+                                                <input
+                                                    type="text"
+                                                    value={shopAddress}
+                                                    onChange={(e) => setShopAddress(e.target.value)}
+                                                    placeholder="Street / Colony name"
+                                                    className="w-full p-2 rounded-lg border border-slate-200 mt-1 text-xs bg-white outline-none focus:border-indigo-500"
+                                                />
+                                            </div>
+                                            <div>
+                                                <div className="flex justify-between items-center mb-1">
+                                                    <label className="text-[11px] font-bold text-indigo-800 uppercase">Store GPS Coordinates</label>
+                                                    <button
+                                                        type="button"
+                                                        disabled={capturingGps}
+                                                        onClick={handleCaptureStoreGPS}
+                                                        className="text-[10px] bg-indigo-600 text-white px-2 py-1 rounded-md font-bold"
+                                                    >
+                                                        {capturingGps ? "Getting GPS..." : "Use My Live GPS"}
+                                                    </button>
+                                                </div>
+                                                <div className="flex gap-2">
+                                                    <input
+                                                        type="text"
+                                                        value={shopLat}
+                                                        onChange={(e) => setShopLat(e.target.value)}
+                                                        placeholder="Latitude"
+                                                        className="w-1/2 p-2 rounded-lg border border-slate-200 text-xs bg-white outline-none"
+                                                    />
+                                                    <input
+                                                        type="text"
+                                                        value={shopLng}
+                                                        onChange={(e) => setShopLng(e.target.value)}
+                                                        placeholder="Longitude"
+                                                        className="w-1/2 p-2 rounded-lg border border-slate-200 text-xs bg-white outline-none"
+                                                    />
+                                                </div>
+                                            </div>
+                                        </div>
+                                    )}
+
+                                    <div>
+                                        <label className="text-[11px] font-bold text-slate-500 uppercase">Email</label>
+                                        <input
+                                            type="text"
+                                            value={email}
+                                            onChange={(e) => setEmail(e.target.value)}
+                                            placeholder="email@localkart.com"
+                                            className="w-full p-2.5 rounded-xl border border-slate-200 mt-1 text-sm outline-none focus:border-blue-500"
+                                        />
+                                    </div>
+
+                                    <div>
+                                        <label className="text-[11px] font-bold text-slate-500 uppercase">Password</label>
+                                        <input
+                                            type="password"
+                                            value={password}
+                                            onChange={(e) => setPassword(e.target.value)}
+                                            placeholder="Enter password"
+                                            className="w-full p-2.5 rounded-xl border border-slate-200 mt-1 text-sm outline-none focus:border-blue-500"
+                                        />
+                                    </div>
+                                </div>
+
+                                <button
+                                    disabled={isSubmitting}
+                                    type="submit"
+                                    className="w-full bg-blue-600 text-white py-3 rounded-xl font-bold text-sm shadow-md hover:bg-blue-700 transition disabled:opacity-50"
+                                >
+                                    {isSubmitting ? "Please wait..." : role === "admin" ? "Admin Login" : authTab === "login" ? "Sign In" : "Create Account"}
+                                </button>
+
+                                <div className="mt-4 p-3 rounded-xl bg-slate-50 border border-slate-200 text-[11px] text-slate-600">
+                                    <p className="font-bold text-slate-700 mb-1.5">Quick Demo Accounts:</p>
+                                    <div className="flex flex-wrap gap-1.5">
+                                        <button
+                                            type="button"
+                                            onClick={() => { setRole("customer"); setAuthTab("login"); setEmail("customer@localkart.com"); setPassword("customer123"); }}
+                                            className="px-2 py-1 bg-white border rounded-lg hover:border-blue-400 font-medium"
+                                        >
+                                            Customer
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={() => { setRole("store"); setAuthTab("login"); setEmail("store@localkart.com"); setPassword("store123"); }}
+                                            className="px-2 py-1 bg-white border rounded-lg hover:border-blue-400 font-medium"
+                                        >
+                                            Store Owner
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={() => { setRole("admin"); setAuthTab("login"); setEmail("admin@localkart.com"); setPassword("admin123"); }}
+                                            className="px-2 py-1 bg-amber-50 border border-amber-200 text-amber-800 rounded-lg hover:border-amber-400 font-medium"
+                                        >
+                                            Admin
+                                        </button>
+                                    </div>
+                                </div>
+                            </form>
+                        </div>
+                    </div>
+                );
+            }
+
+            // --- Main Application Layout ---
+            const currentStore = stores.find((s) => s.id === activeStoreId);
+            const query = searchText.toLowerCase();
+            const availableProducts = getAllAvailableProducts(stores).filter(
+                (p) => !query || p.name.toLowerCase().includes(query)
+            );
+
+            return (
+                <div className="flex flex-col h-screen bg-slate-50 relative">
+                    {notice && (
+                        <div className={`fixed top-4 left-1/2 -translate-x-1/2 z-50 px-4 py-2.5 rounded-xl shadow-lg text-xs font-bold text-white ${
+                            notice.type === "error" ? "bg-red-600" : notice.type === "success" ? "bg-emerald-600" : "bg-slate-800"
+                        }`}>
+                            {notice.text}
+                        </div>
+                    )}
+
+                    {/* App Header */}
+                    <div className="bg-blue-600 text-white px-4 pt-4 pb-3 shadow-md sticky top-0 z-20">
+                        <div className="flex justify-between items-center mb-2.5">
+                            <div>
+                                <h1 className="text-lg font-extrabold flex items-center gap-1.5 leading-none">
+                                    Local Kart
+                                    <span className="text-[10px] uppercase bg-blue-500 px-1.5 py-0.5 rounded font-semibold">
+                                        {user.role}
+                                    </span>
+                                </h1>
+                                <div className="mt-1">{renderStatusBadge()}</div>
+                            </div>
+                            <button onClick={handleLogout} className="text-xs font-bold bg-blue-700 hover:bg-blue-800 px-3 py-1.5 rounded-lg transition">
+                                Logout
+                            </button>
+                        </div>
+                        <div className="relative">
+                            <input
+                                type="text"
+                                placeholder={`Search ${user.role === "customer" ? "stores or products..." : "stores, products, or order ID..."}`}
+                                className="w-full py-2 pl-9 pr-3 rounded-xl text-slate-900 bg-white outline-none text-xs shadow-inner"
+                                value={searchText}
+                                onChange={(e) => setSearchText(e.target.value)}
+                            />
+                            <svg className="w-4 h-4 text-slate-400 absolute left-3 top-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path>
+                            </svg>
+                        </div>
+                    </div>
+
+                    {/* Role-based Body */}
+                    {user.role === "store" && renderStoreOwnerPanel()}
+                    {user.role === "admin" && renderAdminPanel()}
+
+                    {user.role === "customer" && (
+                        <>
+                            {!locationConfirmed ? (
+                                <div className="flex-1 p-5 overflow-y-auto flex flex-col justify-center">
+                                    <div className="text-center mb-5">
+                                        <div className="bg-blue-100 p-3.5 rounded-full inline-flex mb-3 text-blue-600">
+                                            <svg className="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.243-4.243a8 8 0 1111.314 0z"></path>
+                                            </svg>
+                                        </div>
+                                        <h2 className="text-xl font-bold text-slate-800">Set Delivery Location</h2>
+                                        <p className="text-xs text-slate-500 mt-1">
+                                            Use your live GPS or enter coordinates to test the 500m radius rule in real time.
+                                        </p>
+                                    </div>
+
+                                    {/* Real-Time GPS Button */}
+                                    <button
+                                        disabled={capturingGps}
+                                        onClick={handleDetectCustomerGPS}
+                                        className="w-full bg-emerald-600 hover:bg-emerald-700 text-white py-3 rounded-xl font-bold text-sm shadow-md mb-4 disabled:opacity-50"
+                                    >
+                                        {capturingGps ? "Detecting Your Live GPS..." : "Use My Live GPS Location"}
+                                    </button>
+
+                                    {/* Custom Manual Coordinates */}
+                                    <div className="bg-white p-3.5 rounded-xl border border-slate-200 mb-4">
+                                        <p className="text-[11px] font-bold text-slate-600 uppercase mb-2">Or Enter Custom Lat / Lng</p>
+                                        <div className="flex gap-2 mb-2">
+                                            <input
+                                                type="text"
+                                                value={customLat}
+                                                onChange={(e) => setCustomLat(e.target.value)}
+                                                placeholder="Lat (e.g. 21.2514)"
+                                                className="w-1/2 p-2 rounded-lg border text-xs outline-none focus:border-blue-500"
+                                            />
+                                            <input
+                                                type="text"
+                                                value={customLng}
+                                                onChange={(e) => setCustomLng(e.target.value)}
+                                                placeholder="Lng (e.g. 81.6296)"
+                                                className="w-1/2 p-2 rounded-lg border text-xs outline-none focus:border-blue-500"
+                                            />
+                                        </div>
+                                        <button
+                                            onClick={handleApplyManualCoordinates}
+                                            className="w-full bg-slate-800 text-white py-2 rounded-lg text-xs font-bold"
+                                        >
+                                            Apply Custom Coordinates
+                                        </button>
+                                    </div>
+
+                                    {/* Preset Demo Locations */}
+                                    <div className="bg-white p-3.5 rounded-xl border border-slate-200">
+                                        <p className="text-[11px] font-bold text-slate-500 uppercase mb-2">Or Pick a Demo Location</p>
+                                        <div className="space-y-1.5 mb-3">
+                                            {DEMO_LOCATIONS.map((loc, idx) => (
+                                                <label
+                                                    key={idx}
+                                                    className={`flex items-center p-2.5 rounded-lg border cursor-pointer text-xs font-semibold ${
+                                                        selectedLoc.label === loc.label
+                                                            ? "border-blue-500 bg-blue-50 text-blue-800"
+                                                            : "bg-slate-50 border-slate-200 text-slate-700"
+                                                    }`}
+                                                >
+                                                    <input
+                                                        type="radio"
+                                                        name="loc"
+                                                        checked={selectedLoc.label === loc.label}
+                                                        onChange={() => setSelectedLoc(loc)}
+                                                        className="mr-2"
+                                                    />
+                                                    {loc.label}
+                                                </label>
+                                            ))}
+                                        </div>
+                                        <button
+                                            onClick={() => { setLocationConfirmed(true); loadAppData(null, selectedLoc); }}
+                                            className="w-full bg-blue-600 text-white py-2.5 rounded-xl font-bold text-xs shadow-sm hover:bg-blue-700"
+                                        >
+                                            Confirm Selected Demo Location
+                                        </button>
+                                    </div>
+                                </div>
+                            ) : (
+                                <>
+                                    <div className="flex-1 overflow-y-auto p-4 pb-24">
+                                        {page === "home" && (
+                                            <div>
+                                                <div className="flex justify-between items-center mb-3 bg-emerald-50 px-3 py-2 rounded-xl border border-emerald-200">
+                                                    <span className="text-xs text-emerald-800 font-semibold truncate">
+                                                        {selectedLoc.label}
+                                                    </span>
+                                                    <button onClick={() => setLocationConfirmed(false)} className="text-xs text-blue-700 font-bold underline ml-2 shrink-0">
+                                                        Change
+                                                    </button>
+                                                </div>
+
+                                                <div className="flex mb-4 bg-slate-200/80 rounded-xl p-1">
+                                                    <button
+                                                        onClick={() => setBrowseMode("stores")}
+                                                        className={`flex-1 py-1.5 text-xs font-bold rounded-lg transition ${
+                                                            browseMode === "stores" ? "bg-white shadow text-blue-700" : "text-slate-600"
+                                                        }`}
+                                                    >
+                                                        Nearby Stores
+                                                    </button>
+                                                    <button
+                                                        onClick={() => setBrowseMode("products")}
+                                                        className={`flex-1 py-1.5 text-xs font-bold rounded-lg transition ${
+                                                            browseMode === "products" ? "bg-white shadow text-orange-600" : "text-slate-600"
+                                                        }`}
+                                                    >
+                                                        Instant Products
+                                                    </button>
+                                                </div>
+
+                                                {browseMode === "stores" ? (
+                                                    <div className="space-y-3">
+                                                        {stores
+                                                            .filter(
+                                                                (s) =>
+                                                                    s.subscriptionActive &&
+                                                                    s.status === "Active" &&
+                                                                    (!query ||
+                                                                        s.name.toLowerCase().includes(query) ||
+                                                                        s.products.some((p) => p.name.toLowerCase().includes(query)))
+                                                            )
+                                                            .map((store) => (
+                                                                <div
+                                                                    key={store.id}
+                                                                    onClick={() => { setActiveStoreId(store.id); setPage("store"); setSearchText(""); }}
+                                                                    className={`bg-white border rounded-2xl p-4 shadow-sm cursor-pointer hover:shadow-md transition ${
+                                                                        store.distance > 500 ? "border-orange-200" : "border-slate-200"
+                                                                    }`}
+                                                                >
+                                                                    <div className="flex justify-between items-start">
+                                                                        <div>
+                                                                            <h3 className="font-bold text-slate-800 flex items-center gap-2 text-sm">
+                                                                                {store.name}
+                                                                                {store.premium && (
+                                                                                    <span className="bg-amber-100 text-amber-800 text-[10px] px-2 py-0.5 rounded-full font-bold">
+                                                                                        PREMIUM
+                                                                                    </span>
+                                                                                )}
+                                                                            </h3>
+                                                                            <p className="text-[11px] text-slate-400 mt-0.5">{store.address}</p>
+                                                                            <div className="mt-2">
+                                                                                <span className={`text-[11px] font-bold px-2 py-0.5 rounded-md ${
+                                                                                    store.distance <= 500
+                                                                                        ? "bg-emerald-50 text-emerald-700"
+                                                                                        : "bg-orange-50 text-orange-700"
+                                                                                }`}>
+                                                                                    {formatDistance(store.distance)} away • {store.distance <= 500 ? "Free Batch" : "+₹40 Extended"}
+                                                                                </span>
+                                                                            </div>
+                                                                        </div>
+                                                                        <span className="text-blue-600 font-bold text-xs bg-blue-50 px-2.5 py-1.5 rounded-lg">
+                                                                            View &rarr;
+                                                                        </span>
+                                                                    </div>
+                                                                </div>
+                                                            ))}
+                                                    </div>
+                                                ) : (
+                                                    <div>
+                                                        <div className="bg-orange-50 border border-orange-200 p-3 rounded-xl mb-3">
+                                                            <p className="text-xs font-bold text-orange-800">Auto-Allocated Instant Delivery</p>
+                                                            <p className="text-[11px] text-orange-700">
+                                                                Automatically picks the nearest store with stock (+₹50 instant fee).
+                                                            </p>
+                                                        </div>
+                                                        <div className="space-y-2">
+                                                            {availableProducts.map((prod) => (
+                                                                <div key={prod.name} className="bg-white border border-slate-200 rounded-xl p-3 flex justify-between items-center gap-3 shadow-sm">
+                                                                    <div className="flex-1 min-w-0">
+                                                                        <p className="font-bold text-sm text-slate-800">{prod.name}</p>
+                                                                        <p className="text-xs text-slate-600 font-semibold">
+                                                                            From ₹{prod.price} <span className="text-slate-400 font-normal">/ {prod.unit || "1 unit"}</span>
+                                                                        </p>
+                                                                        {prod.description && (
+                                                                            <p className="text-[11px] text-slate-400 mt-0.5 truncate">{prod.description}</p>
+                                                                        )}
+                                                                    </div>
+                                                                    <button
+                                                                        onClick={() => handleInstantBuy(prod.name)}
+                                                                        className="bg-orange-500 hover:bg-orange-600 text-white px-3 py-1.5 rounded-lg text-xs font-bold shadow-sm shrink-0"
+                                                                    >
+                                                                        Buy Instantly
+                                                                    </button>
+                                                                </div>
+                                                            ))}
+                                                        </div>
+                                                    </div>
+                                                )}
+                                            </div>
+                                        )}
+
+                                        {page === "store" && currentStore && (
+                                            <div>
+                                                <button onClick={() => setPage("home")} className="text-xs text-blue-600 font-bold mb-3">
+                                                    &larr; Back to Stores
+                                                </button>
+                                                <div className="bg-white border border-slate-200 rounded-2xl p-4 mb-4 shadow-sm">
+                                                    <h2 className="font-extrabold text-lg text-slate-800">{currentStore.name}</h2>
+                                                    <p className="text-xs text-slate-500">
+                                                        {currentStore.address} • {formatDistance(currentStore.distance)} away
+                                                    </p>
+                                                    {currentStore.distance > 500 && (
+                                                        <p className="text-[11px] text-orange-700 font-semibold mt-2 bg-orange-50 p-2 rounded-lg border border-orange-200">
+                                                            Outside 500m radius: ₹40 extended delivery charge applies.
+                                                        </p>
+                                                    )}
+                                                </div>
+                                                <div className="space-y-2.5">
+                                                    {currentStore.products
+                                                        .filter((p) => !query || p.name.toLowerCase().includes(query))
+                                                        .map((prod) => (
+                                                            <div key={prod.id} className="bg-white border border-slate-200 rounded-xl p-3.5 flex justify-between items-start gap-3 shadow-sm">
+                                                                <div className="flex-1 min-w-0">
+                                                                    <p className="font-bold text-sm text-slate-800">{prod.name}</p>
+                                                                    <p className="text-xs text-slate-700 font-semibold mt-0.5">
+                                                                        ₹{prod.price} <span className="text-slate-500 font-normal">/ {prod.unit || "1 unit"}</span>
+                                                                        <span className={`ml-2 text-[11px] ${prod.stock > 0 ? "text-emerald-600" : "text-red-500"}`}>
+                                                                            {prod.stock > 0 ? `(${prod.stock} in stock)` : "(Out of stock)"}
+                                                                        </span>
+                                                                    </p>
+                                                                    {prod.description && (
+                                                                        <p className="text-[11px] text-slate-500 mt-1 leading-snug">{prod.description}</p>
+                                                                    )}
+                                                                </div>
+                                                                <button
+                                                                    disabled={prod.stock <= 0}
+                                                                    onClick={() => handleAddToCart(prod, currentStore)}
+                                                                    className="bg-blue-600 hover:bg-blue-700 disabled:bg-slate-200 disabled:text-slate-400 text-white px-4 py-1.5 rounded-lg text-xs font-bold transition shrink-0"
+                                                                >
+                                                                    Add +
+                                                                </button>
+                                                            </div>
+                                                        ))}
+                                                </div>
+                                            </div>
+                                        )}
+
+                                        {page === "cart" && (
+                                            <div>
+                                                <div className="flex items-center justify-between mb-4">
+                                                    <h2 className="font-extrabold text-lg text-slate-800">Your Cart</h2>
+                                                    {cart.length > 0 && (
+                                                        <button
+                                                            onClick={handleClearCart}
+                                                            className="text-[11px] bg-red-50 text-red-600 border border-red-200 px-2.5 py-1 rounded-lg font-bold hover:bg-red-100"
+                                                        >
+                                                            Clear Cart
+                                                        </button>
+                                                    )}
+                                                </div>
+                                                {cart.length === 0 ? (
+                                                    <div className="text-center py-12 bg-white rounded-2xl border border-slate-200">
+                                                        <p className="text-slate-400 text-sm mb-3">Your cart is empty.</p>
+                                                        <button onClick={() => setPage("home")} className="text-blue-600 font-bold text-xs underline">
+                                                            Browse Nearby Stores
+                                                        </button>
+                                                    </div>
+                                                ) : (
+                                                    <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm">
+                                                        <p className="text-xs text-slate-500 border-b pb-2 mb-3">
+                                                            Store: <span className="font-bold text-slate-800">{cart[0].storeName}</span> ({formatDistance(cart[0].storeDistance)})
+                                                        </p>
+                                                        {cart.map((item) => (
+                                                            <div key={item.id} className="py-2.5 border-b border-slate-100">
+                                                                <div className="flex justify-between items-start gap-2">
+                                                                    <div>
+                                                                        <p className="text-sm font-semibold text-slate-800">{item.name}</p>
+                                                                        <p className="text-[11px] text-slate-500">
+                                                                            ₹{item.price} / {item.unit || "1 unit"}
+                                                                        </p>
+                                                                    </div>
+                                                                    <span className="font-bold text-sm text-slate-800">₹{item.price * item.qty}</span>
+                                                                </div>
+                                                                <div className="flex justify-between items-center mt-2">
+                                                                    <div className="flex items-center gap-2">
+                                                                        <button
+                                                                            onClick={() => handleUpdateCartQty(item.id, -1)}
+                                                                            className="w-7 h-7 rounded-lg bg-slate-100 hover:bg-slate-200 font-bold text-slate-700 text-xs"
+                                                                        >
+                                                                            -
+                                                                        </button>
+                                                                        <span className="text-xs font-bold w-5 text-center">{item.qty}</span>
+                                                                        <button
+                                                                            onClick={() => handleUpdateCartQty(item.id, 1)}
+                                                                            className="w-7 h-7 rounded-lg bg-blue-100 hover:bg-blue-200 font-bold text-blue-700 text-xs"
+                                                                        >
+                                                                            +
+                                                                        </button>
+                                                                    </div>
+                                                                    <button
+                                                                        onClick={() => handleRemoveFromCart(item.id)}
+                                                                        className="text-[11px] text-red-600 font-bold hover:underline"
+                                                                    >
+                                                                        Remove
+                                                                    </button>
+                                                                </div>
+                                                            </div>
+                                                        ))}
+
+                                                        <label className="mt-4 flex items-center justify-between p-3 rounded-xl bg-orange-50 border border-orange-200 cursor-pointer">
+                                                            <div>
+                                                                <p className="text-xs font-bold text-orange-800">Instant Delivery (+₹50)</p>
+                                                                <p className="text-[10px] text-orange-700">Skip scheduled batch for immediate dispatch</p>
+                                                            </div>
+                                                            <input
+                                                                type="checkbox"
+                                                                checked={instantDelivery}
+                                                                onChange={(e) => setInstantDelivery(e.target.checked)}
+                                                                className="w-4 h-4 accent-orange-500"
+                                                            />
+                                                        </label>
+
+                                                        <div className="mt-4 pt-3 border-t space-y-1.5 text-xs">
+                                                            <div className="flex justify-between text-slate-600">
+                                                                <span>Subtotal</span>
+                                                                <span>₹{subtotal}</span>
+                                                            </div>
+                                                            {distanceFee > 0 && (
+                                                                <div className="flex justify-between text-orange-600 font-semibold">
+                                                                    <span>Extended Distance Fee (&gt;500m)</span>
+                                                                    <span>₹{distanceFee}</span>
+                                                                </div>
+                                                            )}
+                                                            {instantFee > 0 && (
+                                                                <div className="flex justify-between text-orange-600 font-bold">
+                                                                    <span>Instant Delivery Fee</span>
+                                                                    <span>₹{instantFee}</span>
+                                                                </div>
+                                                            )}
+                                                            <div className="flex justify-between font-extrabold text-base text-blue-700 pt-2 border-t">
+                                                                <span>Total Payable</span>
+                                                                <span>₹{totalPayable}</span>
+                                                            </div>
+                                                        </div>
+
+                                                        <button
+                                                            onClick={() => setShowCheckout(true)}
+                                                            className="w-full mt-5 bg-emerald-600 hover:bg-emerald-700 text-white py-3 rounded-xl font-bold text-sm shadow-md"
+                                                        >
+                                                            Proceed to Checkout
+                                                        </button>
+                                                    </div>
+                                                )}
+                                            </div>
+                                        )}
+
+                                        {page === "orders" && (
+                                            <div className="space-y-3">
+                                                <h2 className="font-extrabold text-lg text-slate-800 mb-2">My Orders</h2>
+                                                {orders.length === 0 ? (
+                                                    <p className="text-xs text-slate-400 bg-white p-6 rounded-2xl border text-center">
+                                                        No orders placed yet.
+                                                    </p>
+                                                ) : (
+                                                    orders.map((order) => (
+                                                        <div key={order.id} className="bg-white border border-slate-200 rounded-2xl p-4 shadow-sm">
+                                                            <div className="flex justify-between items-center border-b pb-2 mb-2">
+                                                                <span className="font-extrabold text-xs text-slate-800">{order.id}</span>
+                                                                <span className="text-[10px] font-bold bg-blue-100 text-blue-800 px-2 py-0.5 rounded-full">
+                                                                    {order.status}
+                                                                </span>
+                                                            </div>
+                                                            <p className="text-sm font-bold text-slate-800">{order.storeName}</p>
+                                                            <p className="text-[11px] text-slate-500 mt-0.5">
+                                                                Batch: <b className="text-slate-700">{order.batch}</b> • {order.timestamp}
+                                                            </p>
+                                                            <div className="mt-2 pt-2 border-t flex justify-between items-center text-xs">
+                                                                <span className="font-extrabold text-emerald-700">₹{order.total}</span>
+                                                                <span className="text-[10px] bg-slate-100 text-slate-700 px-2 py-0.5 rounded font-semibold">
+                                                                    {order.paymentMethod.toUpperCase()} • {order.paymentStatus}
+                                                                </span>
+                                                            </div>
+                                                        </div>
+                                                    ))
+                                                )}
+                                            </div>
+                                        )}
+                                    </div>
+
+                                    {/* Bottom Tab Bar */}
+                                    <div className="bg-white border-t border-slate-200 flex justify-around py-2 px-3 fixed bottom-0 w-full max-w-md z-20">
+                                        {["home", "cart", "orders"].map((tab) => (
+                                            <button
+                                                key={tab}
+                                                onClick={() => setPage(tab)}
+                                                className={`flex flex-col items-center text-[11px] font-bold px-4 py-1.5 rounded-xl relative ${
+                                                    page === tab || (tab === "home" && page === "store")
+                                                        ? "text-blue-600 bg-blue-50"
+                                                        : "text-slate-500"
+                                                }`}
+                                            >
+                                                <span className="capitalize">{tab}</span>
+                                                {tab === "cart" && cart.length > 0 && (
+                                                    <span className="absolute -top-1 right-1 bg-red-500 text-white text-[9px] font-bold rounded-full h-4 w-4 flex items-center justify-center">
+                                                        {cart.length}
+                                                    </span>
+                                                )}
+                                            </button>
+                                        ))}
+                                    </div>
+
+                                    {/* Payment Selection Modal */}
+                                    {showCheckout && (
+                                        <div className="fixed inset-0 bg-slate-900/60 flex items-center justify-center p-4 z-50">
+                                            <div className="bg-white p-5 rounded-2xl w-full max-w-sm shadow-2xl">
+                                                <h3 className="font-extrabold text-lg text-slate-800 mb-3 border-b pb-2">
+                                                    Select Payment Method
+                                                </h3>
+                                                <div className="space-y-2.5 mb-4">
+                                                    <label className={`flex items-center p-3 border rounded-xl cursor-pointer text-sm font-semibold ${
+                                                        paymentType === "cod" ? "border-blue-500 bg-blue-50" : "bg-slate-50"
+                                                    }`}>
+                                                        <input
+                                                            type="radio"
+                                                            name="pay"
+                                                            checked={paymentType === "cod"}
+                                                            onChange={() => setPaymentType("cod")}
+                                                            className="mr-3"
+                                                        />
+                                                        Cash on Delivery (COD)
+                                                    </label>
+                                                    <label className={`flex items-center p-3 border rounded-xl cursor-pointer text-sm font-semibold ${
+                                                        paymentType === "razorpay" ? "border-blue-500 bg-blue-50" : "bg-slate-50"
+                                                    }`}>
+                                                        <input
+                                                            type="radio"
+                                                            name="pay"
+                                                            checked={paymentType === "razorpay"}
+                                                            onChange={() => setPaymentType("razorpay")}
+                                                            className="mr-3"
+                                                        />
+                                                        Razorpay Online (Mock UPI / Card)
+                                                    </label>
+                                                </div>
+                                                {paymentType === "razorpay" && (
+                                                    <div className="bg-indigo-50 border border-indigo-200 p-3 rounded-xl text-[11px] text-indigo-800 mb-4">
+                                                        <b>Demo Mode:</b> Simulates Razorpay checkout and backend signature verification without real payment charges.
+                                                    </div>
+                                                )}
+                                                <div className="flex gap-2.5">
+                                                    <button
+                                                        disabled={processingOrder}
+                                                        onClick={() => setShowCheckout(false)}
+                                                        className="flex-1 bg-slate-100 text-slate-700 py-2.5 rounded-xl font-bold text-xs"
+                                                    >
+                                                        Cancel
+                                                    </button>
+                                                    <button
+                                                        disabled={processingOrder}
+                                                        onClick={confirmOrder}
+                                                        className="flex-1 bg-blue-600 text-white py-2.5 rounded-xl font-bold text-xs shadow-md"
+                                                    >
+                                                        {processingOrder ? "Processing..." : `Confirm ₹${totalPayable}`}
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    )}
+                                </>
+                            )}
+                        </>
+                    )}
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById("root"));
+        root.render(<App />);
+    </script>
+</body>
+</html>
